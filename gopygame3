@@ -1,0 +1,1562 @@
+import pygame
+import sys
+import math
+import random
+from enum import Enum
+from typing import List, Tuple, Optional, Set
+import time
+
+# Inicialización de Pygame
+pygame.init()
+
+# Configuración de la ventana
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 800
+BOARD_SIZE = 600
+BOARD_OFFSET_X = 50
+BOARD_OFFSET_Y = 100
+
+# Colores mejorados
+BOARD_COLOR = (220, 179, 92)
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+GRAY = (128, 128, 128)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+YELLOW = (255, 255, 0)
+LIGHT_BROWN = (238, 203, 173)
+DARK_BROWN = (139, 69, 19)
+GOLD = (255, 215, 0)
+SILVER = (192, 192, 192)
+
+# Configuración del tablero
+GRID_SIZE = 19
+CELL_SIZE = BOARD_SIZE // GRID_SIZE
+STONE_RADIUS = CELL_SIZE // 2 - 2
+
+# Estados del juego
+class GameState(Enum):
+    MENU = 1
+    PLAYING = 2
+    GAME_OVER = 3
+    SETTINGS = 4
+
+class Difficulty(Enum):
+    EASY = 1
+    MEDIUM = 2
+    HARD = 3
+
+class Board:
+    EMPTY = 0
+    BLACK = 1
+    WHITE = 2
+
+    def __init__(self, size=19):
+        self.size = size
+        self.grid = [[self.EMPTY for _ in range(size)] for _ in range(size)]
+        self.last_move = None
+        self.captured_black = 0
+        self.captured_white = 0
+        self.move_history = []
+        self.ko_point = None
+        self.territories = {'black': set(), 'white': set(), 'neutral': set()}
+
+    def copy(self):
+        new_board = Board(self.size)
+        new_board.grid = [row[:] for row in self.grid]
+        new_board.last_move = self.last_move
+        new_board.captured_black = self.captured_black
+        new_board.captured_white = self.captured_white
+        new_board.move_history = self.move_history.copy()
+        new_board.ko_point = self.ko_point
+        return new_board
+
+    def place_stone(self, row, col, color):
+        if not self.is_valid_move(row, col, color):
+            return False
+
+        # Guardar estado para ko
+        prev_grid = [row[:] for row in self.grid]
+
+        self.grid[row][col] = color
+
+        # Capturar piedras enemigas
+        enemy_color = self.WHITE if color == self.BLACK else self.BLACK
+        captured = self._capture_stones(row, col, enemy_color)
+
+        # Verificar suicidio
+        if not self._has_liberties(row, col, color):
+            self.grid[row][col] = self.EMPTY
+            return False
+
+        # Actualizar regla del ko
+        if captured == 1 and self._is_ko_situation(prev_grid):
+            self.grid[row][col] = self.EMPTY
+            return False
+
+        self.last_move = (row, col)
+        self.move_history.append((row, col, color))
+
+        # Actualizar ko point si se capturó exactamente una piedra
+        if captured == 1:
+            for r in range(self.size):
+                for c in range(self.size):
+                    if prev_grid[r][c] != self.EMPTY and self.grid[r][c] == self.EMPTY:
+                        self.ko_point = (r, c)
+                        break
+        else:
+            self.ko_point = None
+
+        return True
+
+    def _is_ko_situation(self, prev_grid):
+        if len(self.move_history) < 2:
+            return False
+
+        # Verificar si el tablero volvió al estado anterior
+        for r in range(self.size):
+            for c in range(self.size):
+                if self.grid[r][c] != prev_grid[r][c]:
+                    return False
+        return True
+
+    def is_valid_move(self, row, col, color):
+        if row < 0 or row >= self.size or col < 0 or col >= self.size:
+            return False
+
+        if self.grid[row][col] != self.EMPTY:
+            return False
+
+        # Verificar ko
+        if self.ko_point == (row, col):
+            return False
+
+        # Temporalmente colocar la piedra para verificar validez
+        self.grid[row][col] = color
+
+        # Verificar si captura piedras enemigas
+        enemy_color = self.WHITE if color == self.BLACK else self.BLACK
+        captures_enemy = False
+
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < self.size and 0 <= nc < self.size:
+                if self.grid[nr][nc] == enemy_color:
+                    if not self._has_liberties(nr, nc, enemy_color):
+                        captures_enemy = True
+                        break
+
+        # Verificar si el grupo tendría libertades
+        has_liberties = self._has_liberties(row, col, color)
+
+        # Restaurar el tablero
+        self.grid[row][col] = self.EMPTY
+
+        return has_liberties or captures_enemy
+
+    def _has_liberties(self, row, col, color):
+        visited = set()
+        return self._check_liberties_recursive(row, col, color, visited)
+
+    def _check_liberties_recursive(self, row, col, color, visited):
+        if (row, col) in visited:
+            return False
+
+        if row < 0 or row >= self.size or col < 0 or col >= self.size:
+            return False
+
+        if self.grid[row][col] == self.EMPTY:
+            return True
+
+        if self.grid[row][col] != color:
+            return False
+
+        visited.add((row, col))
+
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            if self._check_liberties_recursive(row + dr, col + dc, color, visited):
+                return True
+
+        return False
+
+    def _capture_stones(self, row, col, enemy_color):
+        captured = 0
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < self.size and 0 <= nc < self.size:
+                if self.grid[nr][nc] == enemy_color:
+                    if not self._has_liberties(nr, nc, enemy_color):
+                        captured += self._remove_group(nr, nc, enemy_color)
+
+        if enemy_color == self.BLACK:
+            self.captured_black += captured
+        else:
+            self.captured_white += captured
+
+        return captured
+
+    def _remove_group(self, row, col, color):
+        if row < 0 or row >= self.size or col < 0 or col >= self.size:
+            return 0
+
+        if self.grid[row][col] != color:
+            return 0
+
+        self.grid[row][col] = self.EMPTY
+        removed = 1
+
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            removed += self._remove_group(row + dr, col + dc, color)
+
+        return removed
+
+    def calculate_territory(self):
+        self.territories = {'black': set(), 'white': set(), 'neutral': set()}
+        visited = set()
+
+        for row in range(self.size):
+            for col in range(self.size):
+                if self.grid[row][col] == self.EMPTY and (row, col) not in visited:
+                    territory, owner = self._flood_fill_territory(row, col, visited)
+                    if owner == self.BLACK:
+                        self.territories['black'].update(territory)
+                    elif owner == self.WHITE:
+                        self.territories['white'].update(territory)
+                    else:
+                        self.territories['neutral'].update(territory)
+
+        return self.territories
+
+    def _flood_fill_territory(self, start_row, start_col, visited):
+        territory = set()
+        stack = [(start_row, start_col)]
+        borders = set()
+
+        while stack:
+            row, col = stack.pop()
+
+            if (row, col) in visited:
+                continue
+
+            if row < 0 or row >= self.size or col < 0 or col >= self.size:
+                continue
+
+            if self.grid[row][col] != self.EMPTY:
+                borders.add(self.grid[row][col])
+                continue
+
+            visited.add((row, col))
+            territory.add((row, col))
+
+            for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                stack.append((row + dr, col + dc))
+
+        # Determinar el dueño del territorio
+        if len(borders) == 1:
+            owner = borders.pop()
+        else:
+            owner = None
+
+        return territory, owner
+
+    def get_score(self):
+        self.calculate_territory()
+
+        black_score = len(self.territories['black']) + self.captured_white
+        white_score = len(self.territories['white']) + self.captured_black + 6.5  # Komi
+
+        return black_score, white_score
+
+class AI:
+    def __init__(self, difficulty=Difficulty.MEDIUM):
+        self.difficulty = difficulty
+        self.color = Board.WHITE
+        self.opening_moves = [
+            (3, 3), (3, 15), (15, 3), (15, 15),  # Esquinas
+            (3, 9), (9, 3), (9, 15), (15, 9),    # Lados
+            (9, 9)                                # Centro
+        ]
+        self.joseki_patterns = self._load_joseki_patterns()
+
+    def _load_joseki_patterns(self):
+        # Patrones básicos de joseki (apertura estándar)
+        return {
+            'corner_3_3': [(3, 3), (3, 4), (4, 3)],
+            'corner_3_4': [(3, 4), (3, 3), (4, 4)],
+            'corner_4_4': [(4, 4), (3, 3), (4, 3)]
+        }
+
+    def make_move(self, board):
+        if self.difficulty == Difficulty.EASY:
+            return self._random_move(board)
+        elif self.difficulty == Difficulty.MEDIUM:
+            return self._medium_move(board)
+        else:
+            return self._advanced_move(board)
+
+    def _random_move(self, board):
+        valid_moves = []
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.is_valid_move(row, col, self.color):
+                    valid_moves.append((row, col))
+
+        if valid_moves:
+            return random.choice(valid_moves)
+        return None
+
+    def _medium_move(self, board):
+        # Fase de apertura
+        if len(board.move_history) < 10:
+            move = self._opening_move(board)
+            if move:
+                return move
+
+        # Buscar capturas
+        capture_move = self._find_capture_move(board)
+        if capture_move:
+            return capture_move
+
+        # Defender grupos en peligro
+        defense_move = self._defend_groups(board)
+        if defense_move:
+            return defense_move
+
+        # Expandir territorio
+        expansion_move = self._expand_territory(board)
+        if expansion_move:
+            return expansion_move
+
+        # Movimiento aleatorio si no hay mejor opción
+        return self._random_move(board)
+
+    def _opening_move(self, board):
+        # Buscar movimientos de apertura estándar
+        for move in self.opening_moves:
+            if board.is_valid_move(move[0], move[1], self.color):
+                # Verificar si es una buena posición de apertura
+                if self._is_good_opening_position(board, move[0], move[1]):
+                    return move
+        return None
+
+    def _is_good_opening_position(self, board, row, col):
+        # Verificar si hay suficiente espacio alrededor
+        empty_count = 0
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == Board.EMPTY:
+                        empty_count += 1
+
+        return empty_count > 15
+
+    def _find_capture_move(self, board):
+        enemy_color = Board.BLACK if self.color == Board.WHITE else Board.WHITE
+
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.is_valid_move(row, col, self.color):
+                    # Simular movimiento
+                    temp_board = board.copy()
+                    temp_board.grid[row][col] = self.color
+
+                    # Verificar capturas
+                    try:
+                        captures = self._check_captures(temp_board, row, col, enemy_color)
+                        if captures > 0:
+                            return (row, col)
+                    except Exception as e:
+                        print(f"Error al verificar capturas: {e}")
+                        continue
+
+        return None
+
+    def _check_captures(self, board, row, col, enemy_color):
+        captures = 0
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if board.grid[nr][nc] == enemy_color:
+                    if not board._has_liberties(nr, nc, enemy_color):
+                        captures += self._count_group_size(board, nr, nc, enemy_color)
+        return captures
+
+    def _count_group_size(self, board, row, col, color):
+        if row < 0 or row >= board.size or col < 0 or col >= board.size:
+            return 0
+
+        if board.grid[row][col] != color:
+            return 0
+
+        visited = set()
+        return self._count_group_recursive(board, row, col, color, visited)
+
+    def _count_group_recursive(self, board, row, col, color, visited):
+        if (row, col) in visited:
+            return 0
+
+        if row < 0 or row >= board.size or col < 0 or col >= board.size:
+            return 0
+
+        if board.grid[row][col] != color:
+            return 0
+
+        visited.add((row, col))
+        count = 1
+
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            count += self._count_group_recursive(board, row + dr, col + dc, color, visited)
+
+        return count
+
+    def _defend_groups(self, board):
+        # Buscar grupos propios con pocas libertades
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.grid[row][col] == self.color:
+                    liberties = self._count_liberties(board, row, col, self.color)
+                    if liberties <= 2:
+                        # Buscar movimiento que añada libertades
+                        defense = self._find_liberty_move(board, row, col)
+                        if defense:
+                            return defense
+        return None
+
+    def _count_liberties(self, board, row, col, color):
+        visited = set()
+        liberties = set()
+        self._find_liberties_recursive(board, row, col, color, visited, liberties)
+        return len(liberties)
+
+    def _find_liberties_recursive(self, board, row, col, color, visited, liberties):
+        if (row, col) in visited:
+            return
+
+        if row < 0 or row >= board.size or col < 0 or col >= board.size:
+            return
+
+        if board.grid[row][col] == Board.EMPTY:
+            liberties.add((row, col))
+            return
+
+        if board.grid[row][col] != color:
+            return
+
+        visited.add((row, col))
+
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            self._find_liberties_recursive(board, row + dr, col + dc, color, visited, liberties)
+
+    def _find_liberty_move(self, board, group_row, group_col):
+        visited = set()
+        liberties = set()
+        self._find_liberties_recursive(board, group_row, group_col, self.color, visited, liberties)
+
+        # Verificar cuál libertad es mejor para jugar
+        best_liberty = None
+        best_score = -1
+
+        for lib_row, lib_col in liberties:
+            if board.is_valid_move(lib_row, lib_col, self.color):
+                score = self._evaluate_liberty_move(board, lib_row, lib_col)
+                if score > best_score:
+                    best_score = score
+                    best_liberty = (lib_row, lib_col)
+
+        return best_liberty
+
+    def _evaluate_liberty_move(self, board, row, col):
+        score = 0
+
+        # Preferir movimientos que conecten con otros grupos
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if board.grid[nr][nc] == self.color:
+                    score += 10
+
+        # Preferir movimientos centrales
+        center = board.size // 2
+        distance = abs(row - center) + abs(col - center)
+        score += (board.size - distance)
+
+        return score
+
+    def _expand_territory(self, board):
+        # Buscar áreas vacías para expandir territorio
+        best_move = None
+        best_score = -1
+
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.is_valid_move(row, col, self.color):
+                    score = self._evaluate_territory_move(board, row, col)
+                    if score > best_score:
+                        best_score = score
+                        best_move = (row, col)
+
+        return best_move
+
+    def _evaluate_territory_move(self, board, row, col):
+        score = 0
+
+        # Contar espacios vacíos adyacentes
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == Board.EMPTY:
+                        score += 1
+                    elif board.grid[nr][nc] == self.color:
+                        score += 2
+
+        # Bonus por estar cerca del borde (para asegurar territorio)
+        if row < 4 or row > board.size - 5 or col < 4 or col > board.size - 5:
+            score += 5
+
+        return score
+
+    def _advanced_move(self, board):
+        # Implementación más sofisticada para nivel difícil
+
+        # Fase de apertura con joseki
+        if len(board.move_history) < 15:
+            move = self._joseki_move(board)
+            if move:
+                return move
+
+        # Análisis táctico
+        tactical_move = self._tactical_analysis(board)
+        if tactical_move:
+            return tactical_move
+
+        # Análisis estratégico
+        strategic_move = self._strategic_analysis(board)
+        if strategic_move:
+            return strategic_move
+
+        # Si no hay mejor opción, usar movimiento medio
+        return self._medium_move(board)
+
+    def _joseki_move(self, board):
+        # Implementar patrones de joseki básicos
+        if len(board.move_history) < 4:
+            # Primeros movimientos en las esquinas
+            corners = [(3, 3), (3, 15), (15, 3), (15, 15)]
+            for corner in corners:
+                if board.is_valid_move(corner[0], corner[1], self.color):
+                    # Verificar si la esquina está relativamente vacía
+                    if self._is_corner_empty(board, corner[0], corner[1]):
+                        return corner
+
+        # Responder a movimientos del oponente con joseki
+        if board.last_move:
+            response = self._joseki_response(board, board.last_move)
+            if response and board.is_valid_move(response[0], response[1], self.color):
+                return response
+
+        return None
+
+    def _is_corner_empty(self, board, corner_row, corner_col):
+        # Verificar si una esquina está vacía (área 5x5)
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = corner_row + dr, corner_col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] != Board.EMPTY:
+                        return False
+        return True
+
+    def _joseki_response(self, board, last_move):
+        row, col = last_move
+
+        # Respuestas estándar a movimientos en las esquinas
+        if (row, col) == (3, 3):
+            return (3, 4)
+        elif (row, col) == (3, 4):
+            return (4, 3)
+        elif (row, col) == (4, 4):
+            return (3, 3)
+
+        return None
+
+    def _tactical_analysis(self, board):
+        # Análisis táctico: capturas, defensas, ataques
+
+        # 1. Buscar capturas inmediatas
+        capture = self._find_immediate_capture(board)
+        if capture:
+            return capture
+
+        # 2. Defender grupos en atari
+        defense = self._defend_atari(board)
+        if defense:
+            return defense
+
+        # 3. Crear amenazas de captura
+        threat = self._create_capture_threat(board)
+        if threat:
+            return threat
+
+        # 4. Cortar grupos enemigos
+        cut = self._find_cutting_move(board)
+        if cut:
+            return cut
+
+        # 5. Conectar grupos propios
+        connection = self._find_connection_move(board)
+        if connection:
+            return connection
+
+        return None
+
+    def _find_immediate_capture(self, board):
+        enemy_color = Board.BLACK if self.color == Board.WHITE else Board.WHITE
+
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.grid[row][col] == enemy_color:
+                    liberties = self._count_liberties(board, row, col, enemy_color)
+                    if liberties == 1:
+                        # Encontrar la única libertad
+                        visited = set()
+                        libs = set()
+                        self._find_liberties_recursive(board, row, col, enemy_color, visited, libs)
+                        if libs:
+                            lib = libs.pop()
+                            if board.is_valid_move(lib[0], lib[1], self.color):
+                                return lib
+
+        return None
+
+    def _defend_atari(self, board):
+        # Defender grupos propios en atari (1 libertad)
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.grid[row][col] == self.color:
+                    liberties = self._count_liberties(board, row, col, self.color)
+                    if liberties == 1:
+                        # Encontrar la única libertad y jugar ahí
+                        visited = set()
+                        libs = set()
+                        self._find_liberties_recursive(board, row, col, self.color, visited, libs)
+                        if libs:
+                            lib = libs.pop()
+                            if board.is_valid_move(lib[0], lib[1], self.color):
+                                # Verificar que el movimiento realmente salva el grupo
+                                temp_board = board.copy()
+                                temp_board.place_stone(lib[0], lib[1], self.color)
+                                new_liberties = self._count_liberties(temp_board, row, col, self.color)
+                                if new_liberties > 1:
+                                    return lib
+
+        return None
+
+    def _create_capture_threat(self, board):
+        enemy_color = Board.BLACK if self.color == Board.WHITE else Board.WHITE
+
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.grid[row][col] == enemy_color:
+                    liberties = self._count_liberties(board, row, col, enemy_color)
+                    if liberties == 2:
+                        # Reducir a una libertad
+                        visited = set()
+                        libs = set()
+                        self._find_liberties_recursive(board, row, col, enemy_color, visited, libs)
+                        for lib in libs:
+                            if board.is_valid_move(lib[0], lib[1], self.color):
+                                return lib
+
+        return None
+
+    def _find_cutting_move(self, board):
+        enemy_color = Board.BLACK if self.color == Board.WHITE else Board.WHITE
+
+        # Buscar puntos de corte entre grupos enemigos
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.is_valid_move(row, col, self.color):
+                    # Verificar si separa grupos enemigos
+                    enemy_neighbors = []
+                    for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                        nr, nc = row + dr, col + dc
+                        if 0 <= nr < board.size and 0 <= nc < board.size:
+                            if board.grid[nr][nc] == enemy_color:
+                                enemy_neighbors.append((nr, nc))
+
+                    if len(enemy_neighbors) >= 2:
+                        # Verificar si son grupos diferentes
+                        if not self._are_connected(board, enemy_neighbors[0], enemy_neighbors[1], enemy_color):
+                            return (row, col)
+
+        return None
+
+    def _are_connected(self, board, pos1, pos2, color):
+        # Verificar si dos posiciones del mismo color están conectadas
+        visited = set()
+        stack = [pos1]
+
+        while stack:
+            row, col = stack.pop()
+
+            if (row, col) == pos2:
+                return True
+
+            if (row, col) in visited:
+                continue
+
+            visited.add((row, col))
+
+            for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == color and (nr, nc) not in visited:
+                        stack.append((nr, nc))
+
+        return False
+
+    def _find_connection_move(self, board):
+        # Buscar movimientos que conecten grupos propios
+        groups = self._find_all_groups(board, self.color)
+
+        if len(groups) < 2:
+            return None
+
+        # Buscar el mejor punto de conexión entre dos grupos
+        best_move = None
+        best_score = -1
+
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                connection = self._find_best_connection(board, groups[i], groups[j])
+                if connection:
+                    score = len(groups[i]) + len(groups[j])
+                    if score > best_score:
+                        best_score = score
+                        best_move = connection
+
+        return best_move
+
+    def _find_all_groups(self, board, color):
+        visited = set()
+        groups = []
+
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.grid[row][col] == color and (row, col) not in visited:
+                    group = set()
+                    self._find_group_recursive(board, row, col, color, group)
+                    visited.update(group)
+                    groups.append(group)
+
+        return groups
+
+    def _find_group_recursive(self, board, row, col, color, group):
+        if (row, col) in group:
+            return
+
+        if row < 0 or row >= board.size or col < 0 or col >= board.size:
+            return
+
+        if board.grid[row][col] != color:
+            return
+
+        group.add((row, col))
+
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            self._find_group_recursive(board, row + dr, col + dc, color, group)
+
+    def _find_best_connection(self, board, group1, group2):
+        # Encontrar el mejor punto para conectar dos grupos
+        min_distance = float('inf')
+        best_point = None
+
+        for pos1 in group1:
+            for pos2 in group2:
+                # Buscar puntos intermedios
+                mid_points = self._get_intermediate_points(pos1, pos2)
+                for point in mid_points:
+                    if board.is_valid_move(point[0], point[1], self.color):
+                        distance = self._manhattan_distance(pos1, point) + self._manhattan_distance(point, pos2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            best_point = point
+
+        return best_point
+
+    def _get_intermediate_points(self, pos1, pos2):
+        # Obtener puntos entre dos posiciones
+        points = []
+        r1, c1 = pos1
+        r2, c2 = pos2
+
+        # Puntos en línea recta
+        if r1 == r2:
+            for c in range(min(c1, c2) + 1, max(c1, c2)):
+                points.append((r1, c))
+        elif c1 == c2:
+            for r in range(min(r1, r2) + 1, max(r1, r2)):
+                points.append((r, c1))
+        else:
+            # Puntos diagonales y en L
+            points.append((r1, c2))
+            points.append((r2, c1))
+
+        return points
+
+    def _manhattan_distance(self, pos1, pos2):
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+
+    def _strategic_analysis(self, board):
+        # Análisis estratégico: territorio, influencia, forma
+
+        best_move = None
+        best_score = -float('inf')
+
+        # Evaluar cada movimiento posible
+        for row in range(board.size):
+            for col in range(board.size):
+                if board.is_valid_move(row, col, self.color):
+                    score = self._evaluate_move_advanced(board, row, col)
+                    if score > best_score:
+                        best_score = score
+                        best_move = (row, col)
+
+        return best_move
+
+    def _evaluate_move_advanced(self, board, row, col):
+        score = 0
+
+        # 1. Evaluación de territorio
+        territory_score = self._evaluate_territory_advanced(board, row, col)
+        score += territory_score * 10
+
+        # 2. Evaluación de influencia
+        influence_score = self._evaluate_influence(board, row, col)
+        score += influence_score * 8
+
+        # 3. Evaluación de forma
+        shape_score = self._evaluate_shape(board, row, col)
+        score += shape_score * 5
+
+        # 4. Evaluación de conexión
+        connection_score = self._evaluate_connections(board, row, col)
+        score += connection_score * 7
+
+        # 5. Evaluación de invasión/reducción
+        invasion_score = self._evaluate_invasion(board, row, col)
+        score += invasion_score * 6
+
+        # 6. Penalización por movimientos malos
+        if self._is_bad_shape(board, row, col):
+            score -= 20
+
+        return score
+
+    def _evaluate_territory_advanced(self, board, row, col):
+        # Evaluar el impacto en el territorio
+        temp_board = board.copy()
+        temp_board.place_stone(row, col, self.color)
+
+        # Calcular territorio antes y después
+        board.calculate_territory()
+        temp_board.calculate_territory()
+
+        my_territory_before = len(board.territories['black' if self.color == Board.BLACK else 'white'])
+        my_territory_after = len(temp_board.territories['black' if self.color == Board.BLACK else 'white'])
+
+        enemy_territory_before = len(board.territories['white' if self.color == Board.BLACK else 'black'])
+        enemy_territory_after = len(temp_board.territories['white' if self.color == Board.BLACK else 'black'])
+
+        territory_gain = my_territory_after - my_territory_before
+        territory_reduction = enemy_territory_before - enemy_territory_after
+
+        return territory_gain + territory_reduction
+
+    def _evaluate_influence(self, board, row, col):
+        # Evaluar la influencia en el área circundante
+        influence = 0
+        max_distance = 5
+
+        for dr in range(-max_distance, max_distance + 1):
+            for dc in range(-max_distance, max_distance + 1):
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    distance = max(abs(dr), abs(dc))
+                    if distance > 0:
+                        weight = 1.0 / distance
+
+                        if board.grid[nr][nc] == Board.EMPTY:
+                            influence += weight
+                        elif board.grid[nr][nc] == self.color:
+                            influence += weight * 2
+                        else:
+                            influence -= weight
+
+        return influence
+
+    def _evaluate_shape(self, board, row, col):
+        # Evaluar la forma creada por el movimiento
+        score = 0
+
+        # Buscar patrones buenos (ojos, conexiones sólidas)
+        if self._creates_eye(board, row, col):
+            score += 15
+
+        if self._creates_solid_connection(board, row, col):
+            score += 10
+
+        # Buscar extensiones y saltos de caballo
+        if self._is_knight_move(board, row, col):
+            score += 8
+
+        if self._is_one_point_jump(board, row, col):
+            score += 6
+
+        return score
+
+    def _creates_eye(self, board, row, col):
+        # Verificar si el movimiento crea un ojo
+        friendly_count = 0
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if board.grid[nr][nc] == self.color:
+                    friendly_count += 1
+
+        return friendly_count >= 3
+
+    def _creates_solid_connection(self, board, row, col):
+        # Verificar si conecta sólidamente grupos
+        connections = 0
+        for dr, dc in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if board.grid[nr][nc] == self.color:
+                    connections += 1
+
+        return connections >= 2
+
+    def _is_knight_move(self, board, row, col):
+        # Verificar si es un movimiento de caballo desde una piedra amiga
+        knight_moves = [(2, 1), (2, -1), (-2, 1), (-2, -1),
+                       (1, 2), (1, -2), (-1, 2), (-1, -2)]
+
+        for dr, dc in knight_moves:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if board.grid[nr][nc] == self.color:
+                    return True
+
+        return False
+
+    def _is_one_point_jump(self, board, row, col):
+        # Verificar si es un salto de un punto
+        jumps = [(2, 0), (-2, 0), (0, 2), (0, -2)]
+
+        for dr, dc in jumps:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if board.grid[nr][nc] == self.color:
+                    # Verificar que el punto medio esté vacío
+                    mid_r, mid_c = row + dr // 2, col + dc // 2
+                    if board.grid[mid_r][mid_c] == Board.EMPTY:
+                        return True
+
+        return False
+
+    def _evaluate_connections(self, board, row, col):
+        # Evaluar conexiones con grupos existentes
+        score = 0
+
+        # Contar grupos amigos cercanos
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == self.color:
+                        distance = max(abs(dr), abs(dc))
+                        if distance == 1:
+                            score += 3
+                        elif distance == 2:
+                            score += 1
+
+        return score
+
+    def _evaluate_invasion(self, board, row, col):
+        # Evaluar potencial de invasión/reducción
+        score = 0
+        enemy_color = Board.BLACK if self.color == Board.WHITE else Board.WHITE
+
+        # Contar territorio enemigo cercano
+        enemy_territory = 0
+        for dr in range(-3, 4):
+            for dc in range(-3, 4):
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == enemy_color:
+                        enemy_territory += 1
+
+        # Si estamos en territorio enemigo, es una invasión
+        if enemy_territory > 4:
+            score += 10
+
+            # Bonus si podemos hacer vida
+            if self._can_make_life(board, row, col):
+                score += 15
+
+        # Evaluar reducción de territorio enemigo
+        distance_to_enemy = self._min_distance_to_enemy(board, row, col)
+        if distance_to_enemy > 0 and distance_to_enemy <= 3:
+            score += 10 / max(1, distance_to_enemy)
+
+        return score
+
+    def _can_make_life(self, board, row, col):
+        # Verificar si hay espacio para hacer dos ojos
+        empty_space = 0
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == Board.EMPTY:
+                        empty_space += 1
+
+        return empty_space >= 6
+
+    def _min_distance_to_enemy(self, board, row, col):
+        enemy_color = Board.BLACK if self.color == Board.WHITE else Board.WHITE
+        min_dist = float('inf')
+
+        for r in range(board.size):
+            for c in range(board.size):
+                if board.grid[r][c] == enemy_color:
+                    dist = abs(r - row) + abs(c - col)
+                    min_dist = min(min_dist, dist)
+
+        return min_dist if min_dist != float('inf') else 0
+
+    def _is_bad_shape(self, board, row, col):
+        # Detectar formas malas (empty triangle, etc.)
+
+        # Empty triangle
+        patterns = [
+            [(0, 1), (1, 0), (1, 1)],
+            [(0, -1), (1, 0), (1, -1)],
+            [(0, 1), (-1, 0), (-1, 1)],
+            [(0, -1), (-1, 0), (-1, -1)]
+        ]
+
+        for pattern in patterns:
+            stones = 0
+            empty = False
+            for dr, dc in pattern:
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size:
+                    if board.grid[nr][nc] == self.color:
+                        stones += 1
+                    elif (dr, dc) == pattern[2] and board.grid[nr][nc] == Board.EMPTY:
+                        empty = True
+
+            if stones == 2 and empty:
+                return True
+
+        return False
+
+class Game:
+    def __init__(self):
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("Go Game - Advanced")
+        self.clock = pygame.time.Clock()
+        self.board = Board(GRID_SIZE)
+        self.current_player = Board.BLACK
+        self.game_state = GameState.MENU
+        self.ai = AI(Difficulty.MEDIUM)
+        self.ai_enabled = True
+        self.font = pygame.font.Font(None, 36)
+        self.small_font = pygame.font.Font(None, 24)
+        self.pass_count = 0
+        self.game_over = False
+        self.winner = None
+        self.show_territory = False
+        self.hover_pos = None
+        self.last_ai_move_time = 0
+        self.ai_thinking = False
+
+    def draw_board(self):
+        # Dibujar fondo del tablero
+        board_rect = pygame.Rect(BOARD_OFFSET_X - 20, BOARD_OFFSET_Y - 20,
+                                 BOARD_SIZE + 40, BOARD_SIZE + 40)
+        pygame.draw.rect(self.screen, DARK_BROWN, board_rect)
+        pygame.draw.rect(self.screen, BOARD_COLOR,
+                        (BOARD_OFFSET_X - 10, BOARD_OFFSET_Y - 10,
+                         BOARD_SIZE + 20, BOARD_SIZE + 20))
+
+        # Dibujar líneas del grid
+        for i in range(GRID_SIZE):
+            # Líneas horizontales
+            y = BOARD_OFFSET_Y + i * CELL_SIZE
+            pygame.draw.line(self.screen, BLACK,
+                           (BOARD_OFFSET_X, y),
+                           (BOARD_OFFSET_X + BOARD_SIZE - CELL_SIZE, y), 2)
+
+            # Líneas verticales
+            x = BOARD_OFFSET_X + i * CELL_SIZE
+            pygame.draw.line(self.screen, BLACK,
+                           (x, BOARD_OFFSET_Y),
+                           (x, BOARD_OFFSET_Y + BOARD_SIZE - CELL_SIZE), 2)
+
+        # Dibujar puntos estrella (hoshi)
+        star_points = []
+        if GRID_SIZE == 19:
+            star_points = [(3, 3), (3, 9), (3, 15),
+                          (9, 3), (9, 9), (9, 15),
+                          (15, 3), (15, 9), (15, 15)]
+        elif GRID_SIZE == 13:
+            star_points = [(3, 3), (3, 9), (6, 6),
+                          (9, 3), (9, 9)]
+        elif GRID_SIZE == 9:
+            star_points = [(2, 2), (2, 6), (4, 4),
+                          (6, 2), (6, 6)]
+
+        for row, col in star_points:
+            x = BOARD_OFFSET_X + col * CELL_SIZE
+            y = BOARD_OFFSET_Y + row * CELL_SIZE
+            pygame.draw.circle(self.screen, BLACK, (x, y), 4)
+
+    def draw_stones(self):
+        for row in range(GRID_SIZE):
+            for col in range(GRID_SIZE):
+                if self.board.grid[row][col] != Board.EMPTY:
+                    x = BOARD_OFFSET_X + col * CELL_SIZE
+                    y = BOARD_OFFSET_Y + row * CELL_SIZE
+
+                    color = BLACK if self.board.grid[row][col] == Board.BLACK else WHITE
+
+                    # Dibujar sombra
+                    pygame.draw.circle(self.screen, GRAY,
+                                     (x + 2, y + 2), STONE_RADIUS)
+
+                    # Dibujar piedra
+                    pygame.draw.circle(self.screen, color, (x, y), STONE_RADIUS)
+
+                    # Dibujar borde
+                    pygame.draw.circle(self.screen, BLACK if color == WHITE else GRAY,
+                                     (x, y), STONE_RADIUS, 2)
+
+                    # Marcar último movimiento
+                    if self.board.last_move == (row, col):
+                        mark_color = WHITE if color == BLACK else BLACK
+                        pygame.draw.circle(self.screen, mark_color, (x, y), 5)
+
+    def draw_territory(self):
+        if self.show_territory:
+            self.board.calculate_territory()
+
+            for row, col in self.board.territories['black']:
+                x = BOARD_OFFSET_X + col * CELL_SIZE
+                y = BOARD_OFFSET_Y + row * CELL_SIZE
+                pygame.draw.circle(self.screen, BLACK, (x, y), 5)
+
+            for row, col in self.board.territories['white']:
+                x = BOARD_OFFSET_X + col * CELL_SIZE
+                y = BOARD_OFFSET_Y + row * CELL_SIZE
+                pygame.draw.circle(self.screen, WHITE, (x, y), 5)
+                pygame.draw.circle(self.screen, BLACK, (x, y), 5, 1)
+
+    def draw_hover(self):
+        if self.hover_pos and not self.ai_thinking:
+            row, col = self.hover_pos
+            if self.board.is_valid_move(row, col, self.current_player):
+                x = BOARD_OFFSET_X + col * CELL_SIZE
+                y = BOARD_OFFSET_Y + row * CELL_SIZE
+
+                color = BLACK if self.current_player == Board.BLACK else WHITE
+                alpha_surface = pygame.Surface((STONE_RADIUS * 2, STONE_RADIUS * 2), pygame.SRCALPHA)
+                pygame.draw.circle(alpha_surface, (*color, 128), (STONE_RADIUS, STONE_RADIUS), STONE_RADIUS)
+                self.screen.blit(alpha_surface, (x - STONE_RADIUS, y - STONE_RADIUS))
+
+    def draw_ui(self):
+        # Panel lateral
+        panel_rect = pygame.Rect(BOARD_OFFSET_X + BOARD_SIZE + 20, BOARD_OFFSET_Y,
+                                300, BOARD_SIZE)
+        pygame.draw.rect(self.screen, LIGHT_BROWN, panel_rect)
+        pygame.draw.rect(self.screen, DARK_BROWN, panel_rect, 3)
+
+        # Información del juego
+        y_offset = BOARD_OFFSET_Y + 20
+
+        # Turno actual
+        turn_text = "Turno: " + ("Negro" if self.current_player == Board.BLACK else "Blanco")
+        if self.ai_thinking:
+            turn_text += " (IA pensando...)"
+        text = self.font.render(turn_text, True, BLACK)
+        self.screen.blit(text, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+        # Capturas
+        y_offset += 50
+        captures_black = self.font.render(f"Capturas Negro: {self.board.captured_black}", True, BLACK)
+        self.screen.blit(captures_black, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+        y_offset += 40
+        captures_white = self.font.render(f"Capturas Blanco: {self.board.captured_white}", True, BLACK)
+        self.screen.blit(captures_white, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+        # Puntuación
+        if self.show_territory or self.game_over:
+            y_offset += 50
+            black_score, white_score = self.board.get_score()
+            score_text = self.font.render("Puntuación:", True, BLACK)
+            self.screen.blit(score_text, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+            y_offset += 35
+            black_score_text = self.small_font.render(f"Negro: {black_score:.1f}", True, BLACK)
+            self.screen.blit(black_score_text, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+            y_offset += 30
+            white_score_text = self.small_font.render(f"Blanco: {white_score:.1f}", True, BLACK)
+            self.screen.blit(white_score_text, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+        # Botones
+        y_offset = BOARD_OFFSET_Y + BOARD_SIZE - 200
+
+        # Botón Pasar
+        pass_button = pygame.Rect(BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset, 100, 40)
+        pygame.draw.rect(self.screen, GREEN, pass_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, pass_button, 2)
+        pass_text = self.small_font.render("PASAR", True, WHITE)
+        text_rect = pass_text.get_rect(center=pass_button.center)
+        self.screen.blit(pass_text, text_rect)
+
+        # Botón Territorio
+        y_offset += 50
+        territory_button = pygame.Rect(BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset, 150, 40)
+        color = YELLOW if self.show_territory else BLUE
+        pygame.draw.rect(self.screen, color, territory_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, territory_button, 2)
+        territory_text = self.small_font.render("VER TERRITORIO", True, WHITE)
+        text_rect = territory_text.get_rect(center=territory_button.center)
+        self.screen.blit(territory_text, text_rect)
+
+        # Botón Reiniciar
+        y_offset += 50
+        restart_button = pygame.Rect(BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset, 120, 40)
+        pygame.draw.rect(self.screen, RED, restart_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, restart_button, 2)
+        restart_text = self.small_font.render("REINICIAR", True, WHITE)
+        text_rect = restart_text.get_rect(center=restart_button.center)
+        self.screen.blit(restart_text, text_rect)
+
+        # Mensaje de fin de juego
+        if self.game_over:
+            y_offset = BOARD_OFFSET_Y + BOARD_SIZE // 2
+            game_over_text = self.font.render("¡Juego Terminado!", True, RED)
+            self.screen.blit(game_over_text, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+            y_offset += 40
+            if self.winner:
+                winner_text = self.font.render(f"Ganador: {self.winner}", True, GREEN)
+                self.screen.blit(winner_text, (BOARD_OFFSET_X + BOARD_SIZE + 40, y_offset))
+
+    def draw_menu(self):
+        self.screen.fill(BOARD_COLOR)
+
+        # Título
+        title = pygame.font.Font(None, 72).render("GO GAME", True, BLACK)
+        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 100))
+        self.screen.blit(title, title_rect)
+
+        # Botones del menú
+        button_width = 300
+        button_height = 60
+        button_x = WINDOW_WIDTH // 2 - button_width // 2
+
+        # Jugar contra IA
+        y_offset = 250
+        ai_button = pygame.Rect(button_x, y_offset, button_width, button_height)
+        pygame.draw.rect(self.screen, GREEN, ai_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, ai_button, 3)
+        ai_text = self.font.render("Jugar contra IA", True, WHITE)
+        text_rect = ai_text.get_rect(center=ai_button.center)
+        self.screen.blit(ai_text, text_rect)
+
+        # Jugar 2 jugadores
+        y_offset += 80
+        pvp_button = pygame.Rect(button_x, y_offset, button_width, button_height)
+        pygame.draw.rect(self.screen, BLUE, pvp_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, pvp_button, 3)
+        pvp_text = self.font.render("2 Jugadores", True, WHITE)
+        text_rect = pvp_text.get_rect(center=pvp_button.center)
+        self.screen.blit(pvp_text, text_rect)
+
+        # Configuración
+        y_offset += 80
+        settings_button = pygame.Rect(button_x, y_offset, button_width, button_height)
+        pygame.draw.rect(self.screen, YELLOW, settings_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, settings_button, 3)
+        settings_text = self.font.render("Configuración", True, BLACK)
+        text_rect = settings_text.get_rect(center=settings_button.center)
+        self.screen.blit(settings_text, text_rect)
+
+        # Salir
+        y_offset += 80
+        exit_button = pygame.Rect(button_x, y_offset, button_width, button_height)
+        pygame.draw.rect(self.screen, RED, exit_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, exit_button, 3)
+        exit_text = self.font.render("Salir", True, WHITE)
+        text_rect = exit_text.get_rect(center=exit_button.center)
+        self.screen.blit(exit_text, text_rect)
+
+    def draw_settings(self):
+        self.screen.fill(BOARD_COLOR)
+
+        # Título
+        title = self.font.render("CONFIGURACIÓN", True, BLACK)
+        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 50))
+        self.screen.blit(title, title_rect)
+
+        # Dificultad de la IA
+        y_offset = 150
+        diff_text = self.font.render("Dificultad de la IA:", True, BLACK)
+        self.screen.blit(diff_text, (WINDOW_WIDTH // 2 - 150, y_offset))
+
+        # Botones de dificultad
+        y_offset += 50
+        button_width = 150
+        button_height = 50
+
+        # Fácil
+        easy_button = pygame.Rect(WINDOW_WIDTH // 2 - 250, y_offset, button_width, button_height)
+        color = GREEN if self.ai.difficulty == Difficulty.EASY else GRAY
+        pygame.draw.rect(self.screen, color, easy_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, easy_button, 2)
+        easy_text = self.small_font.render("Fácil", True, WHITE)
+        text_rect = easy_text.get_rect(center=easy_button.center)
+        self.screen.blit(easy_text, text_rect)
+
+        # Medio
+        medium_button = pygame.Rect(WINDOW_WIDTH // 2 - 75, y_offset, button_width, button_height)
+        color = YELLOW if self.ai.difficulty == Difficulty.MEDIUM else GRAY
+        pygame.draw.rect(self.screen, color, medium_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, medium_button, 2)
+        medium_text = self.small_font.render("Medio", True, BLACK if self.ai.difficulty == Difficulty.MEDIUM else WHITE)
+        text_rect = medium_text.get_rect(center=medium_button.center)
+        self.screen.blit(medium_text, text_rect)
+
+        # Difícil
+        hard_button = pygame.Rect(WINDOW_WIDTH // 2 + 100, y_offset, button_width, button_height)
+        color = RED if self.ai.difficulty == Difficulty.HARD else GRAY
+        pygame.draw.rect(self.screen, color, hard_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, hard_button, 2)
+        hard_text = self.small_font.render("Difícil", True, WHITE)
+        text_rect = hard_text.get_rect(center=hard_button.center)
+        self.screen.blit(hard_text, text_rect)
+
+        # Botón volver
+        y_offset += 150
+        back_button = pygame.Rect(WINDOW_WIDTH // 2 - 75, y_offset, 150, 50)
+        pygame.draw.rect(self.screen, BLUE, back_button)
+        pygame.draw.rect(self.screen, DARK_BROWN, back_button, 2)
+        back_text = self.font.render("Volver", True, WHITE)
+        text_rect = back_text.get_rect(center=back_button.center)
+        self.screen.blit(back_text, text_rect)
+
+    def handle_click(self, pos):
+        x, y = pos
+
+        if self.game_state == GameState.MENU:
+            self.handle_menu_click(x, y)
+        elif self.game_state == GameState.SETTINGS:
+            self.handle_settings_click(x, y)
+        elif self.game_state == GameState.PLAYING:
+            self.handle_game_click(x, y)
+
+    def handle_menu_click(self, x, y):
+        button_width = 300
+        button_height = 60
+        button_x = WINDOW_WIDTH // 2 - button_width // 2
+
+        # Jugar contra IA
+        if button_x <= x <= button_x + button_width and 250 <= y <= 250 + button_height:
+            self.game_state = GameState.PLAYING
+            self.ai_enabled = True
+            self.reset_game()
+
+        # 2 Jugadores
+        elif button_x <= x <= button_x + button_width and 330 <= y <= 330 + button_height:
+            self.game_state = GameState.PLAYING
+            self.ai_enabled = False
+            self.reset_game()
+
+        # Configuración
+        elif button_x <= x <= button_x + button_width and 410 <= y <= 410 + button_height:
+            self.game_state = GameState.SETTINGS
+
+        # Salir
+        elif button_x <= x <= button_x + button_width and 490 <= y <= 490 + button_height:
+            pygame.quit()
+            sys.exit()
+
+    def handle_settings_click(self, x, y):
+        # Botones de dificultad
+        if 150 <= y <= 250:
+            if WINDOW_WIDTH // 2 - 250 <= x <= WINDOW_WIDTH // 2 - 100:
+                self.ai.difficulty = Difficulty.EASY
+            elif WINDOW_WIDTH // 2 - 75 <= x <= WINDOW_WIDTH // 2 + 75:
+                self.ai.difficulty = Difficulty.MEDIUM
+            elif WINDOW_WIDTH // 2 + 100 <= x <= WINDOW_WIDTH // 2 + 250:
+                self.ai.difficulty = Difficulty.HARD
+
+        # Botón volver
+        elif WINDOW_WIDTH // 2 - 75 <= x <= WINDOW_WIDTH // 2 + 75 and 350 <= y <= 400:
+            self.game_state = GameState.MENU
+
+    def handle_game_click(self, x, y):
+        if self.game_over or self.ai_thinking:
+            return
+
+        # Click en el tablero
+        if BOARD_OFFSET_X <= x <= BOARD_OFFSET_X + BOARD_SIZE - CELL_SIZE and            BOARD_OFFSET_Y <= y <= BOARD_OFFSET_Y + BOARD_SIZE - CELL_SIZE:
+
+            col = round((x - BOARD_OFFSET_X) / CELL_SIZE)
+            row = round((y - BOARD_OFFSET_Y) / CELL_SIZE)
+
+            if 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE:
+                if self.board.place_stone(row, col, self.current_player):
+                    self.pass_count = 0
+                    self.switch_player()
+
+        # Botón Pasar
+        elif BOARD_OFFSET_X + BOARD_SIZE + 40 <= x <= BOARD_OFFSET_X + BOARD_SIZE + 140 and              BOARD_OFFSET_Y + BOARD_SIZE - 200 <= y <= BOARD_OFFSET_Y + BOARD_SIZE - 160:
+            self.pass_turn()
+
+        # Botón Territorio
+        elif BOARD_OFFSET_X + BOARD_SIZE + 40 <= x <= BOARD_OFFSET_X + BOARD_SIZE + 190 and              BOARD_OFFSET_Y + BOARD_SIZE - 150 <= y <= BOARD_OFFSET_Y + BOARD_SIZE - 110:
+            self.show_territory = not self.show_territory
+
+        # Botón Reiniciar
+        elif BOARD_OFFSET_X + BOARD_SIZE + 40 <= x <= BOARD_OFFSET_X + BOARD_SIZE + 160 and              BOARD_OFFSET_Y + BOARD_SIZE - 100 <= y <= BOARD_OFFSET_Y + BOARD_SIZE - 60:
+            self.reset_game()
+
+    def handle_mouse_motion(self, pos):
+        if self.game_state == GameState.PLAYING and not self.game_over and not self.ai_thinking:
+            x, y = pos
+
+            if BOARD_OFFSET_X <= x <= BOARD_OFFSET_X + BOARD_SIZE - CELL_SIZE and                BOARD_OFFSET_Y <= y <= BOARD_OFFSET_Y + BOARD_SIZE - CELL_SIZE:
+
+                col = round((x - BOARD_OFFSET_X) / CELL_SIZE)
+                row = round((y - BOARD_OFFSET_Y) / CELL_SIZE)
+
+                if 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE:
+                    self.hover_pos = (row, col)
+                else:
+                    self.hover_pos = None
+            else:
+                self.hover_pos = None
+
+    def switch_player(self):
+        self.current_player = Board.WHITE if self.current_player == Board.BLACK else Board.BLACK
+
+        # Si es turno de la IA
+        if self.ai_enabled and self.current_player == self.ai.color and not self.game_over:
+            self.ai_thinking = True
+            self.last_ai_move_time = time.time()
+
+    def process_ai_move(self):
+        if self.ai_thinking and time.time() - self.last_ai_move_time > 0.5:
+            move = self.ai.make_move(self.board)
+
+            if move:
+                row, col = move
+                if self.board.place_stone(row, col, self.ai.color):
+                    self.pass_count = 0
+                    self.switch_player()
+            else:
+                self.pass_turn()
+
+            self.ai_thinking = False
+
+    def pass_turn(self):
+        self.pass_count += 1
+
+        if self.pass_count >= 2:
+            self.end_game()
+        else:
+            self.switch_player()
+
+    def end_game(self):
+        self.game_over = True
+        self.show_territory = True
+
+        black_score, white_score = self.board.get_score()
+
+        if black_score > white_score:
+            self.winner = "Negro"
+        elif white_score > black_score:
+            self.winner = "Blanco"
+        else:
+            self.winner = "Empate"
+
+    def reset_game(self):
+        self.board = Board(GRID_SIZE)
+        self.current_player = Board.BLACK
+        self.pass_count = 0
+        self.game_over = False
+        self.winner = None
+        self.show_territory = False
+        self.hover_pos = None
+        self.ai_thinking = False
+
+    def run(self):
+        running = True
+
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    self.handle_click(event.pos)
+                elif event.type == pygame.MOUSEMOTION:
+                    self.handle_mouse_motion(event.pos)
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        if self.game_state == GameState.PLAYING:
+                            self.game_state = GameState.MENU
+                        elif self.game_state == GameState.SETTINGS:
+                            self.game_state = GameState.MENU
+
+            # Procesar movimiento de la IA
+            if self.game_state == GameState.PLAYING and self.ai_enabled:
+                self.process_ai_move()
+
+            # Dibujar
+            self.screen.fill(BOARD_COLOR)
+
+            if self.game_state == GameState.MENU:
+                self.draw_menu()
+            elif self.game_state == GameState.SETTINGS:
+                self.draw_settings()
+            elif self.game_state == GameState.PLAYING:
+                self.draw_board()
+                self.draw_stones()
+                self.draw_territory()
+                self.draw_hover()
+                self.draw_ui()
+
+            pygame.display.flip()
+            self.clock.tick(60)
+
+        pygame.quit()
+        sys.exit()
+
+if __name__ == "__main__":
+    try:
+        game = Game()
+        game.run()
+    except Exception as e:
+        print(f"Error al ejecutar el juego: {e}")
+        import traceback
+        traceback.print_exc()
